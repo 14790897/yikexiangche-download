@@ -1,0 +1,33 @@
+# 敏感配置文件
+settings.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# 下载的文件和数据
+json/
+photograph/
+download_history.json
+failed_downloads.json
+download.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db

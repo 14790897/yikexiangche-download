@@ -1,0 +1,9 @@
+{
+    "clienttype": 70,
+    "bdstoken": "your_bdstoken_here",
+    "need_thumbnail": 1,
+    "need_filter_hidden": 0,
+    "filter_date": "",
+    "date_mode": "before",
+    "Cookie": "your_cookie_here"
+}
