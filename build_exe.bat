@@ -13,7 +13,7 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo ✓ 打包完成！
     echo.
-    echo 生成的exe文件位于: dist\百度一刻相册下载器.exe
+    echo 生成的exe文件位于: dist\BaiduPhotoDownloader.exe
     echo.
     explorer dist
 ) else (
@@ -21,5 +21,3 @@ if %ERRORLEVEL% EQU 0 (
     echo ✗ 打包失败
     echo.
 )
-
-pause

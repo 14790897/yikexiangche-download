@@ -36,7 +36,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='百度一刻相册下载器',
+    name='BaiduPhotoDownloader',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

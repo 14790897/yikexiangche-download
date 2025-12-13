@@ -66,7 +66,9 @@ jobs:
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Path release -Force
-        Copy-Item "dist\\百度一刻相册下载器.exe" release\\
+        Copy-Item "dist\\BaiduPhotoDownloader.exe" release\\
+        # 重命名为中文名（仅本地使用）
+        Rename-Item "release\\BaiduPhotoDownloader.exe" "百度一刻相册下载器.exe"
         Copy-Item icon.ico release\\ -ErrorAction SilentlyContinue
         Copy-Item icon.png release\\ -ErrorAction SilentlyContinue
         
@@ -117,7 +119,6 @@ jobs:
       with:
         files: |
           百度一刻相册下载器-${{ steps.version.outputs.version }}-Windows.zip
-          release/百度一刻相册下载器.exe
           release/VERSION.txt
           release/README.txt
       env:
@@ -133,7 +134,7 @@ jobs:
           ## 百度一刻相册下载器 ${{ github.event.inputs.tag }}
           
           ### 📦 下载
-          - `百度一刻相册下载器.exe` - Windows 可执行文件（带图标）
+          - `百度一刻相册下载器.exe` - Windows 可执行文件（带图标）- 在 ZIP 包内
           - `百度一刻相册下载器-${{ github.event.inputs.tag }}-Windows.zip` - 完整包 (包含使用说明和文档)
           
           ### ✨ 功能特点
@@ -179,7 +180,6 @@ jobs:
           - GUI框架: PySide6
         files: |
           百度一刻相册下载器-${{ github.event.inputs.tag }}-Windows.zip
-          release/百度一刻相册下载器.exe
           release/VERSION.txt
           release/README.txt
         draft: false
