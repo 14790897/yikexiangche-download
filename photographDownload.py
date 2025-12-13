@@ -37,7 +37,7 @@ class photographDownload:
         }
         self.URL = "https://photo.baidu.com/youai/file/v2/download"
         self.json_path = Path("./json/")  # 存储图片元数据的路径
-        self.save_path = Path("./photograph/")  # 存储下载图片的路径
+        self.save_path = Path("D:/我的2022年之前缺失照片/")  # 存储下载图片的路径
         self.clienttype = None
         self.bdstoken = None
         self.failed_photos = set()  # 存储下载失败的照片文件名
@@ -45,7 +45,7 @@ class photographDownload:
         self.failed_downloads = Path("./failed_downloads.json")  # 保存下载失败文件的记录
         self.max_workers = 32  # 并发下载数
         self.chunk_size = 1024 * 512  # 下载块大小
-        self.max_file_size = 100 * 1024 * 1024  # 最大文件大小限制(100MB)
+        self.max_file_size = 500 * 1024 * 1024  # 最大文件大小限制(500MB)
 
         # 创建必要的目录
         self.save_path.mkdir(parents=True, exist_ok=True)

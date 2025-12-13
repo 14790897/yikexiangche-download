@@ -1,0 +1,197 @@
+name: Build and Release 百度一刻相册下载器
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements-gui.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-gui.txt
+
+    - name: Build executable
+      run: |
+        Write-Host "Building 百度一刻相册下载器..." -ForegroundColor Cyan
+        pyinstaller build.spec --clean
+      shell: pwsh
+
+    - name: Get version info
+      id: version
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          $VERSION = "${{ github.event.inputs.tag }}"
+        } else {
+          $VERSION = "${{ github.event.release.tag_name }}"
+        }
+        $COMMIT = git rev-parse --short HEAD
+        $DATE = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        
+        echo "version=$VERSION" >> $env:GITHUB_OUTPUT
+        echo "commit=$COMMIT" >> $env:GITHUB_OUTPUT
+        echo "date=$DATE" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+
+    - name: Package release files
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path release -Force
+        Copy-Item "dist\\百度一刻相册下载器.exe" release\\
+        Copy-Item icon.ico release\\ -ErrorAction SilentlyContinue
+        Copy-Item icon.png release\\ -ErrorAction SilentlyContinue
+        
+        # Create VERSION.txt with multi-line content
+        $versionText = "百度一刻相册下载器`n"
+        $versionText += "=========================================`n"
+        $versionText += "Version: ${{ steps.version.outputs.version }}`n"
+        $versionText += "Commit: ${{ steps.version.outputs.commit }}`n"
+        $versionText += "Build Date: ${{ steps.version.outputs.date }}`n"
+        $versionText += "Platform: Windows 10/11`n`n"
+        $versionText += "功能特点:`n"
+        $versionText += "- 📥 批量下载百度一刻相册照片`n"
+        $versionText += "- 📅 支持按日期过滤照片`n"
+        $versionText += "- ⚡ 32线程并发下载，速度快`n"
+        $versionText += "- 🔄 断点续传，支持暂停恢复`n"
+        $versionText += "- ✅ MD5文件完整性校验`n"
+        $versionText += "- 📊 实时进度显示和日志记录`n"
+        $versionText += "- 🎨 现代化图形界面 (PySide6)`n`n"
+        $versionText += "系统要求:`n"
+        $versionText += "- Windows 10/11`n"
+        $versionText += "- 百度网盘账号`n`n"
+        $versionText += "快速开始:`n"
+        $versionText += "1. 运行程序`n"
+        $versionText += "2. 在配置页面填写 BDSToken 和 Cookie`n"
+        $versionText += "3. 点击获取元数据`n"
+        $versionText += "4. 点击下载照片`n"
+        Set-Content -Path release\\VERSION.txt -Encoding UTF8 -Value $versionText
+        
+        # Copy README as usage guide
+        if (Test-Path README-NEW.md) {
+          Copy-Item README-NEW.md release\\README.txt
+        } elseif (Test-Path README.md) {
+          Copy-Item README.md release\\README.txt
+        }
+        
+        # Copy documentation files
+        Copy-Item 配置说明.md release\\ -ErrorAction SilentlyContinue
+        Copy-Item 日期过滤使用说明.md release\\ -ErrorAction SilentlyContinue
+        Copy-Item BUILD.md release\\ -ErrorAction SilentlyContinue
+        Copy-Item settings.json.example release\\ -ErrorAction SilentlyContinue
+        
+        # Compress to zip
+        Compress-Archive -Path "release\\*" -DestinationPath "百度一刻相册下载器-${{ steps.version.outputs.version }}-Windows.zip"
+
+    - name: Upload to Release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          百度一刻相册下载器-${{ steps.version.outputs.version }}-Windows.zip
+          release/百度一刻相册下载器.exe
+          release/VERSION.txt
+          release/README.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create Release (manual trigger)
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.tag }}
+        name: 百度一刻相册下载器 ${{ github.event.inputs.tag }}
+        body: |
+          ## 百度一刻相册下载器 ${{ github.event.inputs.tag }}
+          
+          ### 📦 下载
+          - `百度一刻相册下载器.exe` - Windows 可执行文件（带图标）
+          - `百度一刻相册下载器-${{ github.event.inputs.tag }}-Windows.zip` - 完整包 (包含使用说明和文档)
+          
+          ### ✨ 功能特点
+          - 📥 批量下载百度一刻相册照片
+          - 📅 支持按日期过滤照片（before/after 模式）
+          - ⚡ 32线程并发下载，速度快
+          - 🔄 断点续传，支持暂停恢复
+          - ✅ MD5文件完整性校验
+          - 📊 实时进度显示和日志记录
+          - 🎨 现代化图形界面 (基于 PySide6)
+          - 🔍 自动检测本地已下载文件，避免重复
+          
+          ### 📋 系统要求
+          - Windows 10/11
+          - 百度网盘账号
+          
+          ### 🚀 快速开始
+          1. 下载并运行 `百度一刻相册下载器.exe`
+          2. 在「配置」页面填写 BDSToken 和 Cookie（从浏览器开发者工具获取）
+          3. （可选）设置日期过滤条件
+          4. 点击「保存配置」
+          5. 在「下载」页面点击「获取元数据」
+          6. 等待完成后点击「下载照片」
+          
+          ### 📖 获取配置信息
+          1. 打开 [百度一刻相册网页版](https://photo.baidu.com/)
+          2. 按 F12 打开开发者工具
+          3. 切换到「网络」(Network) 标签
+          4. 点击「Fetch/XHR」筛选
+          5. 在相册中操作，找到 `list?clienttype=70...` 请求
+          6. 在「标头」中复制 Cookie 值
+          7. 在「负载」中复制 bdstoken 值
+          
+          详细使用说明请查看压缩包内的文档
+          
+          ---
+          
+          **构建信息**
+          - 版本: ${{ steps.version.outputs.version }}
+          - 提交: ${{ steps.version.outputs.commit }}
+          - 日期: ${{ steps.version.outputs.date }}
+          - Python: 3.12
+          - GUI框架: PySide6
+        files: |
+          百度一刻相册下载器-${{ github.event.inputs.tag }}-Windows.zip
+          release/百度一刻相册下载器.exe
+          release/VERSION.txt
+          release/README.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: 百度一刻相册下载器-${{ steps.version.outputs.version }}
+        path: |
+          release/
+          百度一刻相册下载器-${{ steps.version.outputs.version }}-Windows.zip
+        retention-days: 30
