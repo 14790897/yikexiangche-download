@@ -5,6 +5,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -24,20 +25,27 @@ class photographDownload:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        # 设置请求会话
+        # 设置请求会话 - 增加连接池大小以匹配并发线程数
         self.session = requests.Session()
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504]
         )
-        self.session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
+        # 设置连接池大小为40，匹配32个并发线程
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=40,  # 连接池数量
+            pool_maxsize=40       # 每个连接池的最大连接数
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         self.URL = "https://photo.baidu.com/youai/file/v2/download"
         self.json_path = Path("./json/")  # 存储图片元数据的路径
-        self.save_path = Path("D:/我的2022年之前缺失照片/")  # 存储下载图片的路径
+        self.save_path = Path("./photograph/")  # 存储下载图片的路径
         self.clienttype = None
         self.bdstoken = None
         self.failed_photos = set()  # 存储下载失败的照片文件名
@@ -46,6 +54,10 @@ class photographDownload:
         self.max_workers = 32  # 并发下载数
         self.chunk_size = 1024 * 512  # 下载块大小
         self.max_file_size = 500 * 1024 * 1024  # 最大文件大小限制(500MB)
+        
+        # 线程锁保护字典操作
+        self.history_lock = Lock()
+        self.failed_lock = Lock()
 
         # 创建必要的目录
         self.save_path.mkdir(parents=True, exist_ok=True)
@@ -84,16 +96,18 @@ class photographDownload:
     def save_download_history(self):
         """保存下载历史记录"""
         try:
-            with open(self.download_history, 'w', encoding='utf-8') as f:
-                json.dump(self.history, f, ensure_ascii=False, indent=2)
+            with self.history_lock:
+                with open(self.download_history, 'w', encoding='utf-8') as f:
+                    json.dump(self.history, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.logger.error(f"保存下载历史失败: {e}")
 
     def save_failed_downloads(self):
         """保存失败的文件记录"""
         try:
-            with open(self.failed_downloads, 'w', encoding='utf-8') as f:
-                json.dump(self.failed_history, f, ensure_ascii=False, indent=2)
+            with self.failed_lock:
+                with open(self.failed_downloads, 'w', encoding='utf-8') as f:
+                    json.dump(self.failed_history, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.logger.error(f"保存失败文件记录失败: {e}")
 
@@ -229,27 +243,34 @@ class photographDownload:
             r_json = response.json()
             if "error_code" in r_json:
                 raise Exception(f"获取下载链接失败: {r_json.get('error_msg')}")
+            
+            # 检查是否有下载链接
+            if 'dlink' not in r_json:
+                raise Exception(f"响应中缺少下载链接: {r_json}")
 
             # 下载文件
             if self.download_with_resume(r_json['dlink'], save_path):
                 # 计算文件哈希值并记录下载历史
                 file_hash = self.calculate_file_hash(save_path)
-                self.history[file_id] = {
-                    "timestamp": time.time(),
-                    "hash": file_hash,
-                    "date": date,
-                    "filename": safe_filename,
-                    "fsid": fsid,
-                    "size": save_path.stat().st_size
-                }
+                
+                with self.history_lock:
+                    self.history[file_id] = {
+                        "timestamp": time.time(),
+                        "hash": file_hash,
+                        "date": date,
+                        "filename": safe_filename,
+                        "fsid": fsid,
+                        "size": save_path.stat().st_size
+                    }
 
                 # 立即保存下载历史到文件
                 self.save_download_history()
 
                 # 删除失败记录文件中的该文件
-                if file_id in self.failed_history:
-                    del self.failed_history[file_id]
-                    self.save_failed_downloads()
+                with self.failed_lock:
+                    if file_id in self.failed_history:
+                        del self.failed_history[file_id]
+                self.save_failed_downloads()
 
                 self.logger.info(f"成功下载并保存记录: {safe_filename}")
                 return True
@@ -258,13 +279,15 @@ class photographDownload:
             self.logger.error(f"处理文件 {filename} 失败: {str(e)}")
 
             # 将文件记录到失败下载文件
-            if file_id not in self.failed_history:
-                self.failed_history[file_id] = {
-                    "date": date,
-                    "filename": filename,
-                    "fsid": fsid
-                }
-                self.save_failed_downloads()
+            with self.failed_lock:
+                if file_id not in self.failed_history:
+                    self.failed_history[file_id] = {
+                        "date": date,
+                        "filename": filename,
+                        "fsid": fsid,
+                        "error": str(e)
+                    }
+            self.save_failed_downloads()
 
             return False
 
