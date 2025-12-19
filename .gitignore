@@ -21,6 +21,12 @@ download_history.json
 failed_downloads.json
 download.log
 
+# ExifTool 相关文件
+exiftool-13.44_64/
+exiftool_files/
+*_original
+*.exe_original
+
 # IDE
 .vscode/
 .idea/
