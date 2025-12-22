@@ -3,6 +3,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from PIL import Image
@@ -10,6 +12,7 @@ from PIL import Image
 # ================= 配置区域 =================
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff"}
 TAG_DATETIME_ORIGINAL = 36867
+MAX_WORKERS = 8  # 线程数
 # ===========================================
 
 
@@ -33,15 +36,15 @@ def get_exiftool_path():
 
 
 def get_exif_date(file_path):
-    """读取 EXIF 时间"""
+    """读取 EXIF 时间,返回 (时间, 是否损坏)"""
     try:
         img = Image.open(file_path)
         exif_data = img._getexif()
         if not exif_data:
-            return None
-        return exif_data.get(TAG_DATETIME_ORIGINAL)
+            return None, False
+        return exif_data.get(TAG_DATETIME_ORIGINAL), False
     except Exception:
-        return None
+        return None, True  # 无法打开视为损坏
 
 
 def parse_date_from_filename(filename):
@@ -149,6 +152,59 @@ def move_file(src_path, dest_folder):
     return dest_path
 
 
+def process_single_file(args):
+    """处理单个文件(多线程调用)"""
+    file_path, file_name, exiftool_cmd, dirs = args
+    result = {
+        "file": file_name,
+        "action": None,
+        "type": None,
+        "success": False
+    }
+    
+    # 1. 检查文件是否损坏
+    exif_date, is_corrupted = get_exif_date(file_path)
+    if is_corrupted:
+        move_file(file_path, dirs["corrupted"])
+        result["action"] = "corrupted"
+        result["success"] = True
+        return result
+    
+    # 2. 检查 EXIF
+    if exif_date:
+        result["action"] = "skip"
+        result["success"] = True
+        return result
+    
+    # 3. 分析文件名
+    f_type, date_str = parse_date_from_filename(file_name)
+    
+    if f_type != "Unknown" and date_str:
+        # 4. 修复 EXIF 时间
+        if write_exif_date(exiftool_cmd, file_path, date_str):
+            result["type"] = f_type
+            result["success"] = True
+            
+            if f_type == "WeChat":
+                move_file(file_path, dirs["wechat"])
+                result["action"] = "fixed_wechat"
+            elif f_type == "Screenshot":
+                move_file(file_path, dirs["screenshot"])
+                result["action"] = "fixed_screenshot"
+            else:
+                move_file(file_path, dirs["date"])
+                result["action"] = "fixed_date"
+        else:
+            result["action"] = "write_failed"
+    else:
+        # 5. 无法识别
+        move_file(file_path, dirs["review"])
+        result["action"] = "review"
+        result["success"] = True
+    
+    return result
+
+
 def process_directory(directory):
     exiftool_cmd = get_exiftool_path()
     if not exiftool_cmd:
@@ -159,56 +215,64 @@ def process_directory(directory):
 
     print(f"🔧 使用 ExifTool: {exiftool_cmd}")
     print(f"🚀 正在扫描: {directory}")
+    print(f"⚙️  使用 {MAX_WORKERS} 个线程并发处理\n")
 
-    dir_wechat = os.path.join(directory, "fixed_wechat")
-    dir_screenshot = os.path.join(directory, "fixed_screenshot")
-    dir_date = os.path.join(directory, "fixed_date")
-    dir_review = os.path.join(directory, "manual_review")
+    dirs = {
+        "wechat": os.path.join(directory, "fixed_wechat"),
+        "screenshot": os.path.join(directory, "fixed_screenshot"),
+        "date": os.path.join(directory, "fixed_date"),
+        "review": os.path.join(directory, "manual_review"),
+        "corrupted": os.path.join(directory, "corrupted_files")
+    }
 
-    stats = {"total": 0, "fixed_wechat": 0, "fixed_screenshot": 0, "fixed_date": 0, "moved_review": 0}
-
+    # 收集所有文件
+    file_list = []
     for root, _, files in os.walk(directory):
-        if any(x in root for x in ["fixed_wechat", "fixed_screenshot", "fixed_date", "manual_review"]):
+        if any(x in root for x in ["fixed_wechat", "fixed_screenshot", "fixed_date", "manual_review", "corrupted_files"]):
             continue
 
         for file in files:
             ext = os.path.splitext(file)[1].lower()
-            if ext not in VALID_EXTENSIONS:
-                continue
+            if ext in VALID_EXTENSIONS:
+                file_path = os.path.join(root, file)
+                file_list.append((file_path, file, exiftool_cmd, dirs))
+    
+    if not file_list:
+        print("❌ 未找到图片文件")
+        return
+    
+    print(f"📂 找到 {len(file_list)} 个文件,开始处理...\n")
 
-            stats["total"] += 1
-            file_path = os.path.join(root, file)
-
-            # 1. 检查 EXIF
-            if get_exif_date(file_path):
-                continue
-
-            # 2. 分析文件名
-            print(f"处理: {file} ...", end="", flush=True)
-            f_type, date_str = parse_date_from_filename(file)
-
-            if f_type != "Unknown" and date_str:
-                # 3. 修复 EXIF 时间
-                if write_exif_date(exiftool_cmd, file_path, date_str):
-                    if f_type == "WeChat":
-                        move_file(file_path, dir_wechat)
-                        print(" ✅ 修复成功 [微信图片]")
-                        stats["fixed_wechat"] += 1
-                    elif f_type == "Screenshot":
-                        move_file(file_path, dir_screenshot)
-                        print(" ✅ 修复成功 [截图]")
-                        stats["fixed_screenshot"] += 1
-                    else:
-                        move_file(file_path, dir_date)
-                        print(f" ✅ 修复成功 [{f_type}]")
-                        stats["fixed_date"] += 1
-                else:
-                    print(" ❌ 写入失败")
-            else:
-                # 4. 无法识别
-                move_file(file_path, dir_review)
-                stats["moved_review"] += 1
-                print(" ⚠️  无法识别 -> 待人工审核")
+    stats = {"total": len(file_list), "fixed_wechat": 0, "fixed_screenshot": 0, "fixed_date": 0, "moved_review": 0, "corrupted": 0, "skipped": 0}
+    print_lock = threading.Lock()
+    
+    # 多线程处理
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_single_file, f): f for f in file_list}
+        
+        for future in as_completed(futures):
+            result = future.result()
+            
+            with print_lock:
+                if result["action"] == "corrupted":
+                    print(f"❌ {result['file']} - 损坏文件")
+                    stats["corrupted"] += 1
+                elif result["action"] == "skip":
+                    stats["skipped"] += 1
+                elif result["action"] == "fixed_wechat":
+                    print(f"✅ {result['file']} - 微信图片")
+                    stats["fixed_wechat"] += 1
+                elif result["action"] == "fixed_screenshot":
+                    print(f"✅ {result['file']} - 截图")
+                    stats["fixed_screenshot"] += 1
+                elif result["action"] == "fixed_date":
+                    print(f"✅ {result['file']} - {result['type']}")
+                    stats["fixed_date"] += 1
+                elif result["action"] == "review":
+                    print(f"⚠️  {result['file']} - 无法识别")
+                    stats["moved_review"] += 1
+                elif result["action"] == "write_failed":
+                    print(f"❌ {result['file']} - 写入失败")
 
     print("\n" + "=" * 40)
     print(" 🎉 完成！")
@@ -216,6 +280,7 @@ def process_directory(directory):
     print(f" 截图修复: {stats['fixed_screenshot']}")
     print(f" 日期修复: {stats['fixed_date']}")
     print(f" 人工审核: {stats['moved_review']}")
+    print(f" 损坏文件: {stats['corrupted']}")
     print("=" * 40)
     input("按回车键退出...")  # 防止双击运行后窗口直接消失
 
