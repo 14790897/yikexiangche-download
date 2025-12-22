@@ -1,5 +1,5 @@
-from PIL import Image, ImageDraw, ImageFont
-import os
+from PIL import Image, ImageDraw
+
 
 def create_icon():
     """创建应用图标"""
