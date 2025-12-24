@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -6,14 +7,20 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Any, Optional
 
 from PIL import Image
 
 # ================= 配置区域 =================
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff"}
+VIDEO_EXTENSIONS = {".mp4"}
 TAG_DATETIME_ORIGINAL = 36867
 MAX_WORKERS = 8  # 线程数
 # ===========================================
+
+
+def is_video_file(file_path: str) -> bool:
+    return os.path.splitext(file_path)[1].lower() in VIDEO_EXTENSIONS
 
 
 def get_exiftool_path():
@@ -26,25 +33,176 @@ def get_exiftool_path():
     if shutil.which("exiftool"):
         return "exiftool"
 
-    # 检查当前脚本目录
+    # 脚本同目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    local_exiftool = os.path.join(script_dir, "exiftool.exe")
-    if os.path.exists(local_exiftool):
-        return local_exiftool
+    local_exe = os.path.join(script_dir, "exiftool.exe")
+    if os.path.exists(local_exe):
+        return local_exe
 
     return None
 
 
-def get_exif_date(file_path):
-    """读取 EXIF 时间,返回 (时间, 是否损坏)"""
+def fix_file_extension(file_path):
+    """修正文件扩展名（如果格式不符）"""
+    if is_video_file(file_path):
+        return file_path
     try:
-        img = Image.open(file_path)
-        exif_data = img._getexif()
-        if not exif_data:
-            return None, False
-        return exif_data.get(TAG_DATETIME_ORIGINAL), False
+        with Image.open(file_path) as img:
+            real_format = (img.format or "").lower()
+
+        format_to_ext = {
+            "jpeg": ".jpg",
+            "png": ".png",
+            "webp": ".webp",
+            "tiff": ".tiff",
+        }
+        desired_ext = format_to_ext.get(real_format)
+        if not desired_ext:
+            return file_path
+
+        current_ext = os.path.splitext(file_path)[1].lower()
+        if current_ext in (".jpg", ".jpeg") and desired_ext == ".jpg":
+            return file_path
+        if current_ext == desired_ext:
+            return file_path
+
+        base_path = os.path.splitext(file_path)[0]
+        new_path = f"{base_path}{desired_ext}"
+
+        counter = 1
+        while os.path.exists(new_path):
+            new_path = f"{base_path}_fix{counter}{desired_ext}"
+            counter += 1
+
+        os.rename(file_path, new_path)
+        return new_path
     except Exception:
-        return None, True  # 无法打开视为损坏
+        return file_path
+
+
+def _normalize_exif_datetime(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text[:19]
+    if not re.match(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$", text):
+        return None
+
+    # 过滤 QuickTime/MP4 常见“未设置”的默认时间（以及明显不合理的年份）
+    try:
+        year = int(text[0:4])
+        if year < 1970 or year > 2100:
+            return None
+        if year == 1904:
+            return None
+    except Exception:
+        return None
+
+    return text
+
+
+def get_exif_date(file_path, exiftool_cmd):
+    """PIL优先读取EXIF；读不到则用 ExifTool(JSON) 兜底。
+
+    注意：视频（.mp4）不走 PIL，也不会因为读不到日期被当成“损坏”。
+
+    Returns:
+        (exif_date: str|None, is_corrupted: bool)
+    """
+    pil_failed = False
+    is_video = is_video_file(file_path)
+
+    if not is_video:
+        try:
+            with Image.open(file_path) as img:
+                if hasattr(img, "getexif"):
+                    exif = img.getexif()
+                    if exif:
+                        value = exif.get(TAG_DATETIME_ORIGINAL)
+                        normalized = _normalize_exif_datetime(value)
+                        if normalized:
+                            return normalized, False
+                getexif_legacy = getattr(img, "_getexif", None)
+                if callable(getexif_legacy):
+                    exif_data = getexif_legacy()
+                    if isinstance(exif_data, dict) and exif_data:
+                        value = exif_data.get(TAG_DATETIME_ORIGINAL)
+                        normalized = _normalize_exif_datetime(value)
+                        if normalized:
+                            return normalized, False
+        except Exception:
+            pil_failed = True
+
+    try:
+        cmd = [
+            exiftool_cmd,
+            "-j",
+            "-api",
+            "QuickTimeUTC=1",
+            "-api",
+            "LargeFileSupport=1",
+            "-d",
+            "%Y:%m:%d %H:%M:%S",
+            "-DateTimeOriginal",
+            "-CreateDate",
+            "-ModifyDate",
+            "-MediaCreateDate",
+            "-MediaModifyDate",
+            "-TrackCreateDate",
+            "-TrackModifyDate",
+            "-EncodedDate",
+            "-TaggedDate",
+            "-ContentCreateDate",
+            "-CreationDate",
+            "-Keys:CreationDate",
+            file_path,
+        ]
+
+        creationflags = 0
+        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            creationflags=creationflags,
+        )
+        if result.returncode == 0 and result.stdout:
+            data = json.loads(result.stdout)
+            if isinstance(data, list) and data:
+                meta = data[0] if isinstance(data[0], dict) else {}
+                for key in (
+                    "DateTimeOriginal",
+                    "CreateDate",
+                    "MediaCreateDate",
+                    "TrackCreateDate",
+                    "EncodedDate",
+                    "TaggedDate",
+                    "ContentCreateDate",
+                    "CreationDate",
+                    "Keys:CreationDate",
+                    "ModifyDate",
+                    "MediaModifyDate",
+                    "TrackModifyDate",
+                ):
+                    normalized = _normalize_exif_datetime(meta.get(key))
+                    if normalized:
+                        return normalized, False
+
+        if is_video:
+            return None, False
+        if pil_failed:
+            return None, True
+        return None, False
+    except Exception:
+        if is_video:
+            return None, False
+        if pil_failed:
+            return None, True
+        return None, False
 
 
 def parse_date_from_filename(filename):
@@ -61,7 +219,7 @@ def parse_date_from_filename(filename):
                 return "WeChat", datetime.fromtimestamp(timestamp).strftime(
                     "%Y:%m:%d %H:%M:%S"
                 )
-        except:
+        except Exception:
             pass
     
     # 1. 优先:截图/精确时间 (Screenshot_2019-10-02-11-51-30...)
@@ -73,12 +231,15 @@ def parse_date_from_filename(filename):
         try:
             y, m, d, H, M, S = full_match.groups()
             return "Screenshot", f"{y}:{m}:{d} {H}:{M}:{S}"
-        except:
+        except Exception:
             pass
 
-    # 2. 次选:Unix 时间戳 (13位/10位,以1开头)
-    ts_matches = re.findall(r"(1\d{9,12})", filename)
-    for ts_str in ts_matches:
+    # 2. 次选:Unix 时间戳 (严格13位毫秒或10位秒,以1开头)
+    ts_matches = re.findall(r"(?<!\d)(1\d{9})(?!\d)|(1\d{12})(?!\d)", filename)
+    for match in ts_matches:
+        ts_str = match[0] or match[1]  # 10位或13位
+        if not ts_str:
+            continue
         try:
             timestamp = int(ts_str)
             if len(ts_str) == 13:
@@ -87,17 +248,16 @@ def parse_date_from_filename(filename):
                 return "Timestamp", datetime.fromtimestamp(timestamp).strftime(
                     "%Y:%m:%d %H:%M:%S"
                 )
-        except:
+        except Exception:
             continue
 
-    # 3. 保底:纯日期 (20201120...)
-    date_match = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", filename)
+    # 3. 保底:纯日期 (20201120...) - 必须是合法日期
+    date_match = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)", filename)
     if date_match:
         try:
             y, m, d = date_match.groups()
-            if 1 <= int(m) <= 12 and 1 <= int(d) <= 31:
-                return "DateOnly", f"{y}:{m}:{d} 12:00:00"
-        except:
+            return "DateOnly", f"{y}:{m}:{d} 12:00:00"
+        except Exception:
             pass
 
     return "Unknown", None
@@ -109,15 +269,47 @@ def write_exif_date(exiftool_path, file_path, date_str):
         cmd = [
             exiftool_path,
             "-overwrite_original",
-            # '-q', # 注释掉静默模式，我们要看报错
-            f"-DateTimeOriginal={date_str}",
-            f"-CreateDate={date_str}",
-            f"-ModifyDate={date_str}",
-            f"-MediaCreateDate={date_str}",
-            f"-FileCreateDate={date_str}",
-            f"-FileModifyDate={date_str}",
-            file_path,
+            "-api",
+            "QuickTimeUTC=1",
+            "-api",
+            "LargeFileSupport=1",
         ]
+
+        if is_video_file(file_path):
+            # MP4/QuickTime：写入媒体/轨道层的时间，必要时补 Encoded/Tagged。
+            # 避免写 DateTimeOriginal（通常属于照片EXIF）以及文件系统时间（可能因权限失败）。
+            cmd.extend(
+                [
+                    f"-CreateDate={date_str}",
+                    f"-ModifyDate={date_str}",
+                    f"-MediaCreateDate={date_str}",
+                    f"-MediaModifyDate={date_str}",
+                    f"-TrackCreateDate={date_str}",
+                    f"-TrackModifyDate={date_str}",
+                    f"-EncodedDate={date_str}",
+                    f"-TaggedDate={date_str}",
+                    f"-ContentCreateDate={date_str}",
+                    f"-CreationDate={date_str}",
+                ]
+            )
+        else:
+            # 图片：保留原先的写入策略
+            cmd.extend(
+                [
+                    # '-q', # 注释掉静默模式，我们要看报错
+                    f"-DateTimeOriginal={date_str}",
+                    f"-CreateDate={date_str}",
+                    f"-ModifyDate={date_str}",
+                    f"-MediaCreateDate={date_str}",
+                    f"-MediaModifyDate={date_str}",
+                    f"-TrackCreateDate={date_str}",
+                    f"-TrackModifyDate={date_str}",
+                    f"-FileCreateDate={date_str}",
+                    f"-FileModifyDate={date_str}",
+                ]
+            )
+
+        cmd.append(file_path)
         # 增加 text=True 以便直接读取文本报错
         result = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -137,7 +329,7 @@ def write_exif_date(exiftool_path, file_path, date_str):
 def move_file(src_path, dest_folder):
     """移动并重命名防冲突"""
     if not os.path.exists(dest_folder):
-        os.makedirs(dest_folder)
+        os.makedirs(dest_folder, exist_ok=True)
 
     filename = os.path.basename(src_path)
     dest_path = os.path.join(dest_folder, filename)
@@ -162,8 +354,13 @@ def process_single_file(args):
         "success": False
     }
     
+    # 0. 修正文件扩展名（如果需要）
+    file_path = fix_file_extension(file_path)
+    file_name = os.path.basename(file_path)
+    result["file"] = file_name
+    
     # 1. 检查文件是否损坏
-    exif_date, is_corrupted = get_exif_date(file_path)
+    exif_date, is_corrupted = get_exif_date(file_path, exiftool_cmd)
     if is_corrupted:
         move_file(file_path, dirs["corrupted"])
         result["action"] = "corrupted"
@@ -233,7 +430,7 @@ def process_directory(directory):
 
         for file in files:
             ext = os.path.splitext(file)[1].lower()
-            if ext in VALID_EXTENSIONS:
+            if ext in VALID_EXTENSIONS or ext in VIDEO_EXTENSIONS:
                 file_path = os.path.join(root, file)
                 file_list.append((file_path, file, exiftool_cmd, dirs))
     
@@ -243,7 +440,7 @@ def process_directory(directory):
     
     print(f"📂 找到 {len(file_list)} 个文件,开始处理...\n")
 
-    stats = {"total": len(file_list), "fixed_wechat": 0, "fixed_screenshot": 0, "fixed_date": 0, "moved_review": 0, "corrupted": 0, "skipped": 0}
+    stats = {"total": len(file_list), "fixed_wechat": 0, "fixed_screenshot": 0, "fixed_date": 0, "moved_review": 0, "corrupted": 0, "skipped": 0, "processed": 0}
     print_lock = threading.Lock()
     
     # 多线程处理
@@ -254,33 +451,39 @@ def process_directory(directory):
             result = future.result()
             
             with print_lock:
+                stats["processed"] += 1
+                progress = f"[{stats['processed']}/{stats['total']}]"
+                
                 if result["action"] == "corrupted":
-                    print(f"❌ {result['file']} - 损坏文件")
+                    print(f"{progress} ❌ {result['file']} - 损坏文件")
                     stats["corrupted"] += 1
                 elif result["action"] == "skip":
+                    print(f"{progress} ⏭️  {result['file']} - 已有EXIF")
                     stats["skipped"] += 1
                 elif result["action"] == "fixed_wechat":
-                    print(f"✅ {result['file']} - 微信图片")
+                    print(f"{progress} ✅ {result['file']} - 微信图片")
                     stats["fixed_wechat"] += 1
                 elif result["action"] == "fixed_screenshot":
-                    print(f"✅ {result['file']} - 截图")
+                    print(f"{progress} ✅ {result['file']} - 截图")
                     stats["fixed_screenshot"] += 1
                 elif result["action"] == "fixed_date":
-                    print(f"✅ {result['file']} - {result['type']}")
+                    print(f"{progress} ✅ {result['file']} - {result['type']}")
                     stats["fixed_date"] += 1
                 elif result["action"] == "review":
-                    print(f"⚠️  {result['file']} - 无法识别")
+                    print(f"{progress} ⚠️  {result['file']} - 无法识别")
                     stats["moved_review"] += 1
                 elif result["action"] == "write_failed":
-                    print(f"❌ {result['file']} - 写入失败")
+                    print(f"{progress} ❌ {result['file']} - 写入失败")
 
     print("\n" + "=" * 40)
     print(" 🎉 完成！")
+    print(f" 总文件数: {stats['total']}")
     print(f" 微信修复: {stats['fixed_wechat']}")
     print(f" 截图修复: {stats['fixed_screenshot']}")
     print(f" 日期修复: {stats['fixed_date']}")
     print(f" 人工审核: {stats['moved_review']}")
     print(f" 损坏文件: {stats['corrupted']}")
+    print(f" 已有EXIF: {stats['skipped']}")
     print("=" * 40)
     input("按回车键退出...")  # 防止双击运行后窗口直接消失
 
